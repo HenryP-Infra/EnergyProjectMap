@@ -1,0 +1,90 @@
+version: "3.9"
+
+services:
+
+  # ──────────────────────────────────────────────
+  # PostgreSQL with pgvector for full-text search
+  # ──────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-county}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-county_pass}
+      POSTGRES_DB:       ${POSTGRES_DB:-county_permits}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-county}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # Redis (for future Celery task queue)
+  # ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # Langfuse (self-hosted observability)
+  # ──────────────────────────────────────────────
+  langfuse-server:
+    image: langfuse/langfuse:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:          postgresql://${POSTGRES_USER:-county}:${POSTGRES_PASSWORD:-county_pass}@postgres:5432/langfuse
+      NEXTAUTH_SECRET:       ${LANGFUSE_NEXTAUTH_SECRET:-changeme-secret-32chars}
+      NEXTAUTH_URL:          http://localhost:3000
+      SALT:                  ${LANGFUSE_SALT:-changeme-salt}
+      TELEMETRY_ENABLED:     "false"
+    ports:
+      - "3000:3000"
+
+  # ──────────────────────────────────────────────
+  # Streamlit application
+  # ──────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:          postgresql://${POSTGRES_USER:-county}:${POSTGRES_PASSWORD:-county_pass}@postgres:5432/${POSTGRES_DB:-county_permits}
+      ANTHROPIC_API_KEY:     ${ANTHROPIC_API_KEY}
+      LANGFUSE_PUBLIC_KEY:   ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY:   ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_HOST:         http://langfuse-server:3000
+      ADMIN_PASSWORD:        ${ADMIN_PASSWORD:-changeme}
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+    command: >
+      bash -c "
+        python -c 'from db.database import init_db; init_db()' &&
+        streamlit run app.py
+          --server.port 8501
+          --server.address 0.0.0.0
+          --server.headless true
+          --browser.gatherUsageStats false
+      "
+
+volumes:
+  postgres_data:
